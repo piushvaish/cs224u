@@ -1,37 +1,23 @@
-from collections import Counter
+from collections import Counter, namedtuple
 from nltk.tree import Tree
 import numpy as np
 import os
 import pandas as pd
 import random
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, accuracy_score, f1_score
+from sklearn.metrics import classification_report, f1_score
 import scipy.stats
 import utils
 
-
 __author__ = "Christopher Potts"
-__version__ = "CS224u, Stanford, Spring 2018 term"
+__version__ = "CS224u, Stanford, Spring 2020"
 
 
-SST_HOME = 'trees'
-
-
-def sentiment_treebank_reader(
-        src_filename,
-        include_subtrees=False,
-        replace_root_score=True,
-        class_func=None):
+def sentiment_treebank_reader(src_filename, class_func=None):
     """Iterator for the Penn-style distribution of the Stanford
     Sentiment Treebank. The iterator yields (tree, label) pairs.
-
-    The root node of the tree is the label, so the root node itself is
-    replaced with a string to ensure that it doesn't get used as a
-    predictor. The subtree labels are retained. If they are used, it can
-    feel like cheating (see `root_daughter_scores_phis` below), so take
-    care!
 
     The labels are strings. They do not make sense as a linear order
     because negative ('0', '1'), neutral ('2'), and positive ('3','4')
@@ -42,18 +28,10 @@ def sentiment_treebank_reader(
     ----------
     src_filename : str
         Full path to the file to be read.
-    include_subtrees : boolean (default: False)
-        Whether to yield all the subtrees with labels or just the full
-        tree. In both cases, the label is the root of the subtree.
-    replace_root_score : boolean (default: True)
-        The root node of the tree is the label, so, by default, the root
-        node itself is replaced with a string to ensure that it doesn't
-        get used as a predictor.
     class_func : None, or function mapping labels to labels or None
         If this is None, then the original 5-way labels are returned.
         Other options: `binary_class_func` and `ternary_class_func`
         (or you could write your own).
-
 
     Yields
     ------
@@ -63,24 +41,17 @@ def sentiment_treebank_reader(
     """
     if class_func is None:
         class_func = lambda x: x
-    with open(src_filename) as f:
+    with open(src_filename, encoding='utf8') as f:
         for line in f:
             tree = Tree.fromstring(line)
-            if include_subtrees:
+            label = class_func(tree.label())
+            # As in the paper, if the root node doesn't fall into any
+            # of the classes for this version of the problem, then
+            # we drop the example:
+            if label:
                 for subtree in tree.subtrees():
-                    label = subtree.label()
-                    label = class_func(label)
-                    if label:
-                        if replace_root_score:
-                            subtree.set_label("X")
-                        yield (subtree, label)
-            else:
-                label = tree.label()
-                label = class_func(label)
-                if label:
-                    if replace_root_score:
-                        tree.set_label("S")
-                    yield (tree, label)
+                    subtree.set_label(class_func(subtree.label()))
+                yield (tree, label)
 
 
 def binary_class_func(y):
@@ -117,44 +88,34 @@ def ternary_class_func(y):
         return "neutral"
 
 
-def train_reader(**kwargs):
+def train_reader(sst_home, **kwargs):
     """Convenience function for reading the train file, full-trees only."""
-    src = os.path.join(SST_HOME, 'train.txt')
-    return sentiment_treebank_reader(src,**kwargs)
-
-
-def dev_reader(**kwargs):
-    """Convenience function for reading the dev file, full-trees only."""
-    src = os.path.join(SST_HOME, 'dev.txt')
+    src = os.path.join(sst_home, 'train.txt')
     return sentiment_treebank_reader(src, **kwargs)
 
 
-def test_reader(**kwargs):
+def dev_reader(sst_home, **kwargs):
+    """Convenience function for reading the dev file, full-trees only."""
+    src = os.path.join(sst_home, 'dev.txt')
+    return sentiment_treebank_reader(src, **kwargs)
+
+
+def test_reader(sst_home, **kwargs):
     """Convenience function for reading the test file, full-trees only.
     This function should be used only for the final stages of a project,
     to obtain final results.
     """
-    src = os.path.join(SST_HOME, 'test.txt')
+    src = os.path.join(sst_home, 'test.txt')
     return sentiment_treebank_reader(src, **kwargs)
 
 
-def allnodes_train_reader(**kwargs):
-    """Convenience function for reading the train file, all nodes."""
-    src = os.path.join(SST_HOME, 'train.txt')
-    return sentiment_treebank_reader(src, include_subtrees=True, **kwargs)
-
-
-def allnodes_dev_reader():
-    """Convenience function for reading the dev file, all nodes."""
-    src = os.path.join(SST_HOME, 'dev.txt')
-    return sentiment_treebank_reader(src, include_subtrees=True, **kwargs)
-
-
-def build_dataset(reader, phi, class_func, vectorizer=None, vectorize=True):
+def build_dataset(sst_home, reader, phi, class_func, vectorizer=None, vectorize=True):
     """Core general function for building experimental datasets.
 
     Parameters
     ----------
+    sst_home : str
+        Full path to the 'trees' directory for SST.
     reader : iterator
        Should be `train_reader`, `dev_reader`, or another function
        defined in those terms. This is the dataset we'll be
@@ -190,7 +151,7 @@ def build_dataset(reader, phi, class_func, vectorizer=None, vectorize=True):
     labels = []
     feat_dicts = []
     raw_examples = []
-    for tree, label in reader(class_func=class_func):
+    for tree, label in reader(sst_home, class_func=class_func):
         labels.append(label)
         feat_dicts.append(phi(tree))
         raw_examples.append(tree)
@@ -212,25 +173,29 @@ def build_dataset(reader, phi, class_func, vectorizer=None, vectorize=True):
 
 
 def experiment(
+        sst_home,
         phi,
         train_func,
         train_reader=train_reader,
         assess_reader=None,
         train_size=0.7,
-        class_func=binary_class_func,
+        class_func=ternary_class_func,
         score_func=utils.safe_macro_f1,
         vectorize=True,
-        verbose=True):
+        verbose=True,
+        random_state=None):
     """Generic experimental framework for SST. Either assesses with a
     random train/test split of `train_reader` or with `assess_reader` if
     it is given.
 
     Parameters
     ----------
+    sst_home : str
+        Full path to the 'trees' directory for SST.
     phi : feature function
         Any function that takes an `nltk.Tree` instance as input
         and returns a bool/int/float-valued dict as output.
-    train_func : model wrapper (default: `fit_maxent_classifier`)
+    train_func : model wrapper
         Any function that takes a feature matrix and a label list
         as its values and returns a fitted model with a `predict`
         function that operates on feature matrices.
@@ -264,35 +229,54 @@ def experiment(
     verbose : bool (default: True)
         Whether to print out the model assessment to standard output.
         Set to False for statistical testing via repeated runs.
+    random_state : int or None
+        Optionally set the random seed for consistent sampling.
 
     Prints
     -------
     To standard output, if `verbose=True`
-        Model accuracy and a model precision/recall/F1 report. Accuracy is
-        reported because many SST papers report that figure, but the
+        Model precision/recall/F1 report. Accuracy is micro-F1 and is
+        reported because many SST papers report that figure, but macro
         precision/recall/F1 is better given the class imbalances and the
         fact that performance across the classes can be highly variable.
 
     Returns
     -------
-    float
-        The overall scoring metric as determined by `score_metric`.
+    dict with keys
+        'model': trained model
+        'phi': the function used for featurization
+        'train_dataset': a dataset as returned by `build_dataset`
+        'assess_dataset': a dataset as returned by `build_dataset`
+        'predictions': predictions on the assessment data
+        'metric': `score_func.__name__`
+        'score': the `score_func` score on the assessment data
 
     """
     # Train dataset:
     train = build_dataset(
-        train_reader, phi, class_func, vectorizer=None, vectorize=vectorize)
+        sst_home,
+        train_reader,
+        phi,
+        class_func,
+        vectorizer=None,
+        vectorize=vectorize)
     # Manage the assessment set-up:
     X_train = train['X']
     y_train = train['y']
-    X_assess = None
-    y_assess = None
+    raw_train = train['raw_examples']
     if assess_reader == None:
-         X_train, X_assess, y_train, y_assess = train_test_split(
-                X_train, y_train, train_size=train_size, test_size=None)
+        X_train, X_assess, y_train, y_assess, raw_train, raw_assess = train_test_split(
+            X_train, y_train, raw_train,
+            train_size=train_size, test_size=None, random_state=random_state)
+        assess = {
+            'X': X_assess,
+            'y': y_assess,
+            'vectorizer': train['vectorizer'],
+            'raw_examples': raw_assess}
     else:
         # Assessment dataset using the training vectorizer:
         assess = build_dataset(
+            sst_home,
             assess_reader,
             phi,
             class_func,
@@ -305,55 +289,20 @@ def experiment(
     predictions = mod.predict(X_assess)
     # Report:
     if verbose:
-        print('Accuracy: %0.03f' % accuracy_score(y_assess, predictions))
         print(classification_report(y_assess, predictions, digits=3))
-    # Return the overall score:
-    return score_func(y_assess, predictions)
-
-
-def fit_classifier_with_crossvalidation(X, y, basemod, cv, param_grid, scoring='f1_macro'):
-    """Fit a classifier with hyperparmaters set via cross-validation.
-
-    Parameters
-    ----------
-    X : 2d np.array
-        The matrix of features, one example per row.
-    y : list
-        The list of labels for rows in `X`.
-    basemod : an sklearn model class instance
-        This is the basic model-type we'll be optimizing.
-    cv : int
-        Number of cross-validation folds.
-    param_grid : dict
-        A dict whose keys name appropriate parameters for `basemod` and
-        whose values are lists of values to try.
-    scoring : value to optimize for (default: f1_macro)
-        Other options include 'accuracy' and 'f1_micro'. See
-        http://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
-
-    Prints
-    ------
-    To standard output:
-        The best parameters found.
-        The best macro F1 score obtained.
-
-    Returns
-    -------
-    An instance of the same class as `basemod`.
-        A trained model instance, the best model found.
-
-    """
-    # Find the best model within param_grid:
-    crossvalidator = GridSearchCV(basemod, param_grid, cv=cv, scoring=scoring)
-    crossvalidator.fit(X, y)
-    # Report some information:
-    print("Best params", crossvalidator.best_params_)
-    print("Best score: %0.03f" % crossvalidator.best_score_)
-    # Return the best model found:
-    return crossvalidator.best_estimator_
+    # Return the overall score and experimental info:
+    return {
+        'model': mod,
+        'phi': phi,
+        'train_dataset': train,
+        'assess_dataset': assess,
+        'predictions': predictions,
+        'metric': score_func.__name__,
+        'score': score_func(y_assess, predictions)}
 
 
 def compare_models(
+        sst_home,
         phi1,
         train_func1,
         phi2=None,
@@ -371,6 +320,8 @@ def compare_models(
 
     Parameters
     ----------
+    sst_home : str
+        Full path to the 'trees' directory for SST.
     phi1, phi2
         Just like `phi` for `experiment`. `phi1` defaults to
         `unigrams_phi`. If `phi2` is None, then it is set equal
@@ -387,6 +338,13 @@ def compare_models(
     trials : int (default: 10)
         Number of runs on random train/test splits of `reader`,
         with `train_size` controlling the amount of training data.
+    train_size : float
+        Percentage of data o use for training.
+    class_func : function on the SST labels
+        Any function like `binary_class_func` or `ternary_class_func`.
+        This modifies the SST labels based on the experimental
+        design. If `class_func` returns None for a label, then that
+        item is ignored.
 
     Prints
     ------
@@ -399,30 +357,29 @@ def compare_models(
         The first two are the scores from each model (length `trials`),
         and the third is the p-value returned by stats_test.
 
-    TODO
-    ----
-    This function can easily be parallelized. The ParallelPython
-    makes this easy:http://www.parallelpython.com
-
     """
     if phi2 == None:
         phi2 = phi1
     if train_func2 == None:
         train_func2 = train_func1
-    scores1 = np.array([experiment(train_reader=reader,
+    experiments1 = [experiment(sst_home,
+        train_reader=reader,
         phi=phi1,
         train_func=train_func1,
         class_func=class_func,
         score_func=score_func,
         vectorize=vectorize1,
-        verbose=False) for _ in range(trials)])
-    scores2 = np.array([experiment(train_reader=reader,
+        verbose=False) for _ in range(trials)]
+    experiments2 = [experiment(sst_home,
+        train_reader=reader,
         phi=phi2,
         train_func=train_func2,
         class_func=class_func,
         score_func=score_func,
         vectorize=vectorize2,
-        verbose=False) for _ in range(trials)])
+        verbose=False) for _ in range(trials)]
+    scores1 = np.array([d['score'] for d in experiments1])
+    scores2 = np.array([d['score'] for d in experiments2])
     # stats_test returns (test_statistic, p-value). We keep just the p-value:
     pval = stats_test(scores1, scores2)[1]
     # Report:
@@ -433,35 +390,16 @@ def compare_models(
     return (scores1, scores2, pval)
 
 
-def get_vocab(X, n_words=None):
-    """Get the vocabulary for an RNN example matrix `X`,
-    adding $UNK$ if it isn't already present.
+def build_rnn_dataset(sst_home, reader, class_func=ternary_class_func):
+    """Given an SST reader, return the `class_func` version of the
+    dataset as  (X, y) training pair.
 
     Parameters
     ----------
-    X : list of lists of str
-    n_words : int or None
-        If this is `int > 0`, keep only the top `n_words` by frequency.
-
-    Returns
-    -------
-    list of str
-
-    """
-    wc = Counter([w for ex in X for w in ex])
-    wc = wc.most_common(n_words) if n_words else wc.items()
-    vocab = {w for w, c in wc}
-    vocab.add("$UNK")
-    return sorted(vocab)
-
-
-def build_binary_rnn_dataset(reader):
-    """Given an SST reader, return the binary version of the dataset
-    as  (X, y) training pair.
-
-    Parameters
-    ----------
+    sst_home : str
+        Full path to the 'trees' directory for SST.
     reader : train_reader or dev_reader
+    class_func : function on the SST labels
 
     Returns
     -------
@@ -469,30 +407,36 @@ def build_binary_rnn_dataset(reader):
        Where X is a list of list of str, and y is the output label list.
 
     """
-    data = [(tree.leaves(), label) for tree, label in reader(class_func=binary_class_func)]
+    r = reader(sst_home, class_func=class_func)
+    data = [(tree.leaves(), label) for tree, label in r]
     X, y = zip(*data)
     return list(X), list(y)
 
 
-def get_sentence_embedding_from_rnn(rnn, X):
-    """Given a trained model `rnn` and a set of RNN examples `X` create
-    a DataFrame of the final hidden representations.
+def build_tree_dataset(sst_home, reader, class_func=ternary_class_func):
+    """Given an SST reader, return the `class_func` version of the
+    dataset. The root node of each tree (`tree.label()`) is set to
+    the class for that tree. We also return the label vector for
+    assessment.
 
     Parameters
     ----------
-    rnn : `TfRNNClassifier` instance
-    X : list of list of str
-        With a vocab appropriate for `rnn`. This should probably be
-        the same dataset as `rnn` was trained on.
+    sst_home : str
+        Full path to the 'trees' directory for SST.
+    reader : train_reader or dev_reader
+    class_func : function on the SST labels
 
     Returns
     -------
-    pd.DataFrame
+    X, y
+        Where X is a list of `nltk.tree.Tree`, and y is the output
+        label list.
 
     """
-    X_indexed, ex_lengths = rnn._convert_X(X)
-    S = rnn.sess.run(
-        rnn.last,
-        {rnn.inputs: X_indexed, rnn.ex_lengths: ex_lengths})
-    S = pd.DataFrame(S)
-    return S
+    data = []
+    labels = []
+    for (tree, label) in reader(sst_home, class_func=class_func):
+        tree.set_label(label)
+        data.append(tree)
+        labels.append(label)
+    return data, labels
